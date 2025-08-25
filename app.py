@@ -1,18 +1,15 @@
-# Hotel Revenue Simulator — Streamlit App
-# -------------------------------------------------------------
-# Beginner-friendly web app for hotel revenue simulation
-# Run locally: pip install -r requirements.txt
-# Then: streamlit run app.py
+# Hotel Revenue Simulator — Streamlit App (Customized for Ramada Abu Dhabi Corniche)
+# -----------------------------------------------------------------------------
+# This version preloads your hotel inventory (235 rooms) and key Abu Dhabi events
+# with demand uplifts and temporary elasticity dampening during compression.
 #
-# Features:
-# - Room types & inventory with rate fences (min/max)
-# - Segments with mix, elasticity (price sensitivity) & commission
-# - Daily inputs: today's occupancy & ADR, posted rates by room type
-# - Simple forecasting (moving average + weekday factors + event uplifts)
-# - Rule-based rate recommendations by room type
-# - KPIs (Occ, ADR, RevPAR, Revenue gross & net)
-# - 7–28 day projections, charts, and CSV downloads
-# -------------------------------------------------------------
+# How to run locally:
+#   pip install -r requirements.txt
+#   streamlit run app.py
+#
+# How to deploy: push app.py + requirements.txt to a public GitHub repo and
+# deploy with Streamlit Community Cloud (choose app.py as Main file path).
+# -----------------------------------------------------------------------------
 
 from __future__ import annotations
 from dataclasses import dataclass
@@ -24,7 +21,7 @@ import matplotlib.pyplot as plt
 import streamlit as st
 
 # Streamlit page config
-st.set_page_config(page_title="Hotel Revenue Simulator", layout="wide")
+st.set_page_config(page_title="Hotel Revenue Simulator — Ramada AD Corniche", layout="wide")
 plt.style.use("seaborn-v0_8-whitegrid")
 pd.options.display.float_format = lambda x: f"{x:,.2f}"
 
@@ -46,20 +43,30 @@ class Segment:
     elasticity: float    # negative; e.g., -0.5
     commission: float    # fraction; e.g., 0.18 → 18%
 
-# Default data
+# -------------------------
+# Default data — customized for your hotel
+# -------------------------
+# Total rooms = 235
 DEFAULT_ROOMS = pd.DataFrame([
-    {"room_type": "Deluxe City", "rooms": 80, "base_rate": 250.0, "min_rate": 180.0, "max_rate": 380.0},
-    {"room_type": "Deluxe Sea",  "rooms": 60, "base_rate": 300.0, "min_rate": 210.0, "max_rate": 480.0},
-    {"room_type": "Executive",    "rooms": 40, "base_rate": 380.0, "min_rate": 280.0, "max_rate": 650.0},
-    {"room_type": "Suite",        "rooms": 20, "base_rate": 650.0, "min_rate": 450.0, "max_rate": 1200.0},
+    {"room_type": "Deluxe City View",           "rooms": 61, "base_rate": 250.0, "min_rate": 180.0, "max_rate": 380.0},
+    {"room_type": "Deluxe Twin City View",      "rooms": 25, "base_rate": 250.0, "min_rate": 180.0, "max_rate": 380.0},
+    {"room_type": "Deluxe Double Sea View",     "rooms": 38, "base_rate": 300.0, "min_rate": 210.0, "max_rate": 480.0},
+    {"room_type": "Deluxe Twin Sea View",       "rooms": 26, "base_rate": 300.0, "min_rate": 210.0, "max_rate": 480.0},
+    {"room_type": "Executive City View",        "rooms": 25, "base_rate": 380.0, "min_rate": 280.0, "max_rate": 650.0},
+    {"room_type": "Executive Sea View",         "rooms": 26, "base_rate": 420.0, "min_rate": 300.0, "max_rate": 700.0},
+    {"room_type": "People of Determination",    "rooms":  2, "base_rate": 250.0, "min_rate": 180.0, "max_rate": 380.0},
+    {"room_type": "Ramada Suite",               "rooms": 32, "base_rate": 650.0, "min_rate": 450.0, "max_rate": 1200.0},
 ])
 
+# You can edit these in the UI, but here are reasonable starting values
 DEFAULT_SEGS = pd.DataFrame([
-    {"segment": "Business Transient", "mix": 0.30, "elasticity": -0.30, "commission": 0.00},
-    {"segment": "Leisure OTA",        "mix": 0.30, "elasticity": -0.70, "commission": 0.18},
-    {"segment": "Direct Web",         "mix": 0.20, "elasticity": -0.50, "commission": 0.00},
-    {"segment": "Corporate Contract", "mix": 0.15, "elasticity": -0.20, "commission": 0.05},
-    {"segment": "Group",              "mix": 0.05, "elasticity": -0.10, "commission": 0.00},
+    {"segment": "OTA",                "mix": 0.2837, "elasticity": -0.80, "commission": 0.18},
+    {"segment": "Walk-In",            "mix": 0.0386, "elasticity": -0.30, "commission": 0.00},
+    {"segment": "Direct",             "mix": 0.0085, "elasticity": -0.50, "commission": 0.00},
+    {"segment": "Discounted Retail-H", "mix": 0.0117, "elasticity": -0.90, "commission": 0.00},
+    {"segment": "Corporate",          "mix": 0.4528, "elasticity": -0.20, "commission": 0.05},
+    {"segment": "Tour Series",        "mix": 0.0764, "elasticity": -0.50, "commission": 0.10},
+    {"segment": "Wholesaler",         "mix": 0.1271, "elasticity": -0.60, "commission": 0.18},
 ])
 
 DEFAULT_WEEKDAY = pd.DataFrame([
@@ -70,6 +77,25 @@ DEFAULT_WEEKDAY = pd.DataFrame([
     {"weekday": "Fri", "factor": 0.98},
     {"weekday": "Sat", "factor": 0.95},
     {"weekday": "Sun", "factor": 0.98},
+])
+
+# Pre-populated Abu Dhabi events (2025–2026) with demand uplift and elasticity dampening
+# uplift_factor: multiplier to unconstrained demand (1.60 = +60%)
+# elasticity_factor: multiply segment elasticities by this (<1 makes price less sensitive during compression)
+PREPOP_EVENTS = pd.DataFrame([
+    {"name": "ADIHEX 2025", "start_date": pd.to_datetime("2025-08-30"), "end_date": pd.to_datetime("2025-09-07"), "uplift_factor": 1.20, "elasticity_factor": 0.75},
+    {"name": "UFC 321 (Showdown Week)", "start_date": pd.to_datetime("2025-10-24"), "end_date": pd.to_datetime("2025-10-26"), "uplift_factor": 1.35, "elasticity_factor": 0.50},
+    {"name": "ADIPEC 2025", "start_date": pd.to_datetime("2025-11-03"), "end_date": pd.to_datetime("2025-11-06"), "uplift_factor": 1.60, "elasticity_factor": 0.40},
+    {"name": "Abu Dhabi Art 2025", "start_date": pd.to_datetime("2025-11-20"), "end_date": pd.to_datetime("2025-11-24"), "uplift_factor": 1.15, "elasticity_factor": 0.80},
+    {"name": "ADIBS 2025 (Boat Show)", "start_date": pd.to_datetime("2025-11-21"), "end_date": pd.to_datetime("2025-11-24"), "uplift_factor": 1.20, "elasticity_factor": 0.75},
+    {"name": "Global Media Congress 2025", "start_date": pd.to_datetime("2025-11-26"), "end_date": pd.to_datetime("2025-11-28"), "uplift_factor": 1.25, "elasticity_factor": 0.70},
+    {"name": "Mother of the Nation Festival 2025", "start_date": pd.to_datetime("2025-11-22"), "end_date": pd.to_datetime("2025-12-08"), "uplift_factor": 1.10, "elasticity_factor": 0.90},
+    {"name": "F1 Etihad Abu Dhabi Grand Prix 2025", "start_date": pd.to_datetime("2025-12-04"), "end_date": pd.to_datetime("2025-12-07"), "uplift_factor": 1.70, "elasticity_factor": 0.35},
+    {"name": "ADNOC Abu Dhabi Marathon 2025", "start_date": pd.to_datetime("2025-12-12"), "end_date": pd.to_datetime("2025-12-14"), "uplift_factor": 1.10, "elasticity_factor": 0.85},
+    {"name": "World Future Energy Summit 2026", "start_date": pd.to_datetime("2026-01-13"), "end_date": pd.to_datetime("2026-01-15"), "uplift_factor": 1.35, "elasticity_factor": 0.60},
+    {"name": "Abu Dhabi International Book Fair 2026", "start_date": pd.to_datetime("2026-04-26"), "end_date": pd.to_datetime("2026-05-05"), "uplift_factor": 1.20, "elasticity_factor": 0.75},
+    {"name": "Middle East Film & Comic Con 2026", "start_date": pd.to_datetime("2026-04-10"), "end_date": pd.to_datetime("2026-04-12"), "uplift_factor": 1.15, "elasticity_factor": 0.80},
+    {"name": "ADIHEX 2026", "start_date": pd.to_datetime("2026-08-28"), "end_date": pd.to_datetime("2026-09-06"), "uplift_factor": 1.20, "elasticity_factor": 0.75},
 ])
 
 # Rules for rate recommendation
@@ -119,26 +145,44 @@ def weekday_index_map() -> dict[int, str]:
     return {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
 
 
-def apply_weekday_and_events(base_occ: list[float], start: date, weekday_df: pd.DataFrame, events_df: pd.DataFrame) -> list[float]:
+def expand_event_ranges(events_df: pd.DataFrame) -> tuple[dict[date, float], dict[date, float]]:
+    """Create date→uplift and date→elasticity_factor maps from ranged events.
+    If multiple events overlap, we apply the strongest compression: max uplift, min elasticity_factor.
+    """
+    uplift_map: Dict[date, float] = {}
+    elast_map: Dict[date, float] = {}
+    for _, r in events_df.iterrows():
+        try:
+            sd = pd.to_datetime(r["start_date"]).date() if pd.notnull(r["start_date"]) else None
+            ed = pd.to_datetime(r["end_date"]).date() if pd.notnull(r["end_date"]) else sd
+            if sd is None:
+                continue
+            factor = float(r.get("uplift_factor", 1.0))
+            ef     = float(r.get("elasticity_factor", 1.0))
+            d = sd
+            while d <= ed:
+                uplift_map[d] = max(uplift_map.get(d, 1.0), factor)
+                elast_map[d]  = min(elast_map.get(d, 1.0), ef)
+                d += timedelta(days=1)
+        except Exception:
+            continue
+    return uplift_map, elast_map
+
+
+def apply_weekday_and_events(base_occ: list[float], start: date, weekday_df: pd.DataFrame, events_df: pd.DataFrame) -> tuple[list[float], dict[date, float]]:
     name_to_factor = dict(zip(weekday_df["weekday"], weekday_df["factor"]))
     idx_to_name = weekday_index_map()
-    event_map = {}
-    if not events_df.empty:
-        for _, r in events_df.iterrows():
-            try:
-                d = pd.to_datetime(r["date"]).date()
-                event_map[d] = float(r.get("uplift_factor", 1.0))
-            except Exception:
-                pass
+    uplift_map, elast_map = expand_event_ranges(events_df)
+
     adj = []
     for i, o in enumerate(base_occ):
         d = start + timedelta(days=i+1)  # forecast starts tomorrow
         wname = idx_to_name[d.weekday()]
         wfac = float(name_to_factor.get(wname, 1.0))
-        ev = float(event_map.get(d, 1.0))
+        ev = float(uplift_map.get(d, 1.0))
         val = float(np.clip(o * wfac * ev, 0.40, 0.98))
         adj.append(val)
-    return adj
+    return adj, elast_map
 
 
 def rate_recommendation(current_occ: float, room_rate: float, fences: tuple[float, float]) -> float:
@@ -191,15 +235,23 @@ def simulate_day(
     today_rates_map: Dict[str, float],
     overbook: int,
     cancels_pct: float,
+    elasticity_factor: float = 1.0,  # < 1.0 during compression
+    occ_bias: float = 0.0,           # +/- adjust perceived occ for rate recs (budget pacing)
+) -> dict:
+    occ_unconst: float,
+    room_df: pd.DataFrame,
+    seg_df: pd.DataFrame,
+    today_rates_map: Dict[str, float],
+    overbook: int,
+    cancels_pct: float,
+    elasticity_factor: float = 1.0,  # < 1.0 during compression
 ) -> dict:
     total_rooms = int(room_df["rooms"].sum())
 
     # Rate recommendation per type for this occupancy
     rec_rates = {}
     for _, r in room_df.iterrows():
-        curr_rate = float(today_rates_map.get(r["room_type"], r["base_rate"]))
-        rec = rate_recommendation(occ_unconst, curr_rate, (float(r["min_rate"]), float(r["max_rate"])) )
-        rec_rates[r["room_type"]] = rec
+        curr_rate = float(today_rates_map.get(r["room_type"], r["base        rec_rates[r["room_type"]] = rec
 
     # Weighted avg recommended ADR vs base
     base_avg = float(np.average(room_df["base_rate"], weights=room_df["rooms"]))
@@ -209,10 +261,11 @@ def simulate_day(
     # Unconstrained demand
     demand_rooms = occ_unconst * total_rooms
 
-    # Segment demand and elasticity
+    # Segment demand and elasticity (dampened during events)
     demand_by_seg = {s["segment"]: demand_rooms * s["mix"] for _, s in seg_df.iterrows()}
     for _, s in seg_df.iterrows():
-        mult = elasticity_demand_multiplier(price_change_pct, float(s["elasticity"]))
+        eff_el = float(s["elasticity"]) * float(elasticity_factor)
+        mult = elasticity_demand_multiplier(price_change_pct, eff_el)
         demand_by_seg[s["segment"]] *= mult
 
     # Capacity with overbooking; then reduce by cancels/no-shows
@@ -257,8 +310,9 @@ def simulate_day(
 # -------------------------
 # UI — Sidebar inputs
 # -------------------------
-st.title("🏨 Hotel Revenue Simulator")
-st.caption("Beginner-friendly tool for daily pricing, forecasting, and KPIs")
+
+st.title("🏨 Hotel Revenue Simulator — Ramada Abu Dhabi Corniche")
+st.caption("Beginner-friendly tool for daily pricing, forecasting, and KPIs (with Abu Dhabi events)")
 
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -309,21 +363,55 @@ with st.sidebar:
             key="weekday_editor",
         )
 
-    with st.expander("Special Events (uplift)", expanded=False):
+    with st.expander("Special Events (ranges, uplift & elasticity)", expanded=True):
+        st.caption("Uplift >1 increases demand; Elasticity factor <1 makes demand less price-sensitive during events.")
         events_df = st.data_editor(
-            pd.DataFrame([{ "date": "", "uplift_factor": 1.00 }]),
+            PREPOP_EVENTS.copy(),
             use_container_width=True,
             num_rows="dynamic",
             column_config={
-                "date": st.column_config.DateColumn("Date"),
-                "uplift_factor": st.column_config.NumberColumn("Uplift Factor", min_value=0.5, max_value=2.0, step=0.01),
+                "name": st.column_config.TextColumn("Event"),
+                "start_date": st.column_config.DateColumn("Start Date"),
+                "end_date": st.column_config.DateColumn("End Date"),
+                "uplift_factor": st.column_config.NumberColumn("Uplift", min_value=0.8, max_value=2.5, step=0.01),
+                "elasticity_factor": st.column_config.NumberColumn("Elasticity ×", min_value=0.2, max_value=1.2, step=0.05),
             },
             key="events_editor",
         )
 
+    with st.expander("Budget & Pace (current month)", expanded=True):
+        # Pick any date inside the budget month (defaults to today)
+        budget_ref_date = st.date_input("Budget month (pick any date in the month)")
+        # Initialize a budget table with segments present in seg_df
+        _seg_names = seg_df["segment"].tolist() if not seg_df.empty else DEFAULT_SEGS["segment"].tolist()
+        budget_init = pd.DataFrame({
+            "segment": _seg_names,
+            "budget_RN": [0]*len(_seg_names),
+            "budget_ADR": [0.0]*len(_seg_names),
+            "budget_Revenue": [0.0]*len(_seg_names),
+            "MTD_actual_RN": [0]*len(_seg_names),
+            "MTD_actual_Revenue": [0.0]*len(_seg_names),
+        })
+        budget_df = st.data_editor(
+            budget_init,
+            use_container_width=True,
+            num_rows="dynamic",
+            column_config={
+                "segment": st.column_config.TextColumn("Segment"),
+                "budget_RN": st.column_config.NumberColumn("Budget RN (month)", min_value=0, step=1),
+                "budget_ADR": st.column_config.NumberColumn("Budget ADR", min_value=0.0, step=1.0),
+                "budget_Revenue": st.column_config.NumberColumn("Budget Revenue (optional)", min_value=0.0, step=100.0),
+                "MTD_actual_RN": st.column_config.NumberColumn("MTD Actual RN (optional)", min_value=0, step=1),
+                "MTD_actual_Revenue": st.column_config.NumberColumn("MTD Actual Revenue (optional)", min_value=0.0, step=100.0),
+            },
+            key="budget_editor",
+        )
+        st.caption("Tip: Fill at least Budget RN and ADR by segment. If you add MTD Actuals, the simulator will pace against remaining days.")
+
     st.divider()
     with st.expander("Overbooking & Cancels", expanded=False):
         overbook_rooms = st.number_input("Overbooking buffer (rooms)", min_value=0, max_value=100, value=DEFAULT_OVERBOOK)
+        cancels_pct = st.number_input("Cancels/No-Show %", min_value=0.0, max_value=0.5, value=DEFAULT_CANCELS_NOSHOW, step=0.01, format="%.2f")
         cancels_pct = st.number_input("Cancels/No-Show %", min_value=0.0, max_value=0.5, value=DEFAULT_CANCELS_NOSHOW, step=0.01, format="%.2f")
 
 # -------------------------
@@ -371,7 +459,6 @@ run_btn = st.button("🚀 Run Forecast & Recommendations", type="primary")
 # Execute simulation
 # -------------------------
 if run_btn:
-    # Validate inputs
     if room_df.empty or seg_df.empty:
         st.error("Please configure room types and segments.")
         st.stop()
@@ -396,8 +483,8 @@ if run_btn:
     base_occ_forecast = moving_average_forecast(occ_hist, horizon=int(forecast_days), window=min(7, len(occ_hist)))
     start_date = date.today()
 
-    # Apply weekday & events adjustments
-    occ_forecast = apply_weekday_and_events(base_occ_forecast, start=start_date, weekday_df=weekday_df, events_df=events_df)
+    # Apply weekday & events adjustments (also returns per-day elasticity factors)
+    occ_forecast, elast_map = apply_weekday_and_events(base_occ_forecast, start=start_date, weekday_df=weekday_df, events_df=events_df)
 
     # Today's KPIs (from inputs)
     rooms_sold_today = round(today_occ * total_rooms)
@@ -424,6 +511,7 @@ if run_btn:
     projections = []
     rec_tables = []
     for i, occ_u in enumerate(occ_forecast, start=1):
+        d = start_date + timedelta(days=i)
         sim = simulate_day(
             occ_unconst=float(occ_u),
             room_df=room_df,
@@ -431,9 +519,10 @@ if run_btn:
             today_rates_map=today_rates_map,
             overbook=int(overbook_rooms),
             cancels_pct=float(cancels_pct),
+            elasticity_factor=float(elast_map.get(d, 1.0)),
         )
         projections.append({
-            "date": start_date + timedelta(days=i),
+            "date": d,
             "Occ%": sim["kpis"]["Occ%"],
             "ADR": sim["kpis"]["ADR"],
             "RevPAR": sim["kpis"]["RevPAR"],
@@ -444,7 +533,7 @@ if run_btn:
             "Rec_Avg_Rate": sim["rec_avg_rate"],
             "Price_Change_%": sim["price_change_pct"],
         })
-        rec_row = {"date": start_date + timedelta(days=i)}
+        rec_row = {"date": d}
         rec_row.update(sim["rec_rates"])  # columns per room_type
         rec_tables.append(rec_row)
 
