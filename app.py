@@ -2,6 +2,8 @@
 # -----------------------------------------------------------------------------
 # This version preloads your hotel inventory (235 rooms) and key Abu Dhabi events
 # with demand uplifts and temporary elasticity dampening during compression.
+# It also adds a Monthly Budget (per segment) editor and shows Budget vs Forecast
+# for the remainder of the current month, plus a budget‑nudged rate suggestion.
 #
 # How to run locally:
 #   pip install -r requirements.txt
@@ -58,15 +60,15 @@ DEFAULT_ROOMS = pd.DataFrame([
     {"room_type": "Ramada Suite",               "rooms": 32, "base_rate": 650.0, "min_rate": 450.0, "max_rate": 1200.0},
 ])
 
-# You can edit these in the UI, but here are reasonable starting values
+# Suggested segment setup (can edit in UI)
 DEFAULT_SEGS = pd.DataFrame([
-    {"segment": "OTA",                "mix": 0.2837, "elasticity": -0.80, "commission": 0.18},
-    {"segment": "Walk-In",            "mix": 0.0386, "elasticity": -0.30, "commission": 0.00},
-    {"segment": "Direct",             "mix": 0.0085, "elasticity": -0.50, "commission": 0.00},
-    {"segment": "Discounted Retail-H", "mix": 0.0117, "elasticity": -0.90, "commission": 0.00},
-    {"segment": "Corporate",          "mix": 0.4528, "elasticity": -0.20, "commission": 0.05},
-    {"segment": "Tour Series",        "mix": 0.0764, "elasticity": -0.50, "commission": 0.10},
-    {"segment": "Wholesaler",         "mix": 0.1271, "elasticity": -0.60, "commission": 0.18},
+    {"segment": "OTA",                 "mix": 0.2837, "elasticity": -0.80, "commission": 0.18},
+    {"segment": "Walk-In",             "mix": 0.0386, "elasticity": -0.30, "commission": 0.00},
+    {"segment": "Direct",              "mix": 0.0085, "elasticity": -0.50, "commission": 0.00},
+    {"segment": "Discounted Retail-H", "mix": 0.0117, "elasticity": -0.90, "commission": 0.18},
+    {"segment": "Corporate",           "mix": 0.4528, "elasticity": -0.20, "commission": 0.05},
+    {"segment": "Tour Series",         "mix": 0.0764, "elasticity": -0.15, "commission": 0.00},
+    {"segment": "Wholesaler",          "mix": 0.1271, "elasticity": -0.45, "commission": 0.15},
 ])
 
 DEFAULT_WEEKDAY = pd.DataFrame([
@@ -119,35 +121,36 @@ def normalize_mix(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def generate_synthetic_history(n_days: int, today_occ: float, today_adr: float) -> tuple[list[float], list[float]]:
-    occ_hist, adr_hist = [], []
+def generate_synthetic_history(n_days: int, today_occ: float, today_adr: float) -> Tuple[List[float], List[float]]:
+    occ_hist: List[float] = []
+    adr_hist: List[float] = []
     for i in range(n_days):
         drift = (i - n_days/2) / (n_days*3)
-        occ = np.clip(today_occ + np.random.uniform(-0.06, 0.06) + drift, 0.45, 0.92)
-        adr = max(80.0, today_adr * np.random.uniform(0.94, 1.06))
-        occ_hist.append(float(occ))
-        adr_hist.append(float(adr))
+        occ = float(np.clip(today_occ + np.random.uniform(-0.06, 0.06) + drift, 0.45, 0.92))
+        adr = float(max(80.0, today_adr * np.random.uniform(0.94, 1.06)))
+        occ_hist.append(occ)
+        adr_hist.append(adr)
     return occ_hist, adr_hist
 
 
-def moving_average_forecast(series: list[float], horizon: int, window: int = 7) -> list[float]:
+def moving_average_forecast(series: List[float], horizon: int, window: int = 7) -> List[float]:
     s = list(series)
-    out = []
+    out: List[float] = []
     for _ in range(horizon):
         lookback = s[-window:] if len(s) >= window else s
-        ma = sum(lookback) / len(lookback)
+        ma = sum(lookback) / len(lookback) if lookback else 0.0
         out.append(ma)
         s.append(ma)
     return out
 
 
-def weekday_index_map() -> dict[int, str]:
+def weekday_index_map() -> Dict[int, str]:
     return {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
 
 
-def expand_event_ranges(events_df: pd.DataFrame) -> tuple[dict[date, float], dict[date, float]]:
+def expand_event_ranges(events_df: pd.DataFrame) -> Tuple[Dict[date, float], Dict[date, float]]:
     """Create date→uplift and date→elasticity_factor maps from ranged events.
-    If multiple events overlap, we apply the strongest compression: max uplift, min elasticity_factor.
+    If multiple events overlap, apply strongest compression: max uplift, min elasticity_factor.
     """
     uplift_map: Dict[date, float] = {}
     elast_map: Dict[date, float] = {}
@@ -169,12 +172,12 @@ def expand_event_ranges(events_df: pd.DataFrame) -> tuple[dict[date, float], dic
     return uplift_map, elast_map
 
 
-def apply_weekday_and_events(base_occ: list[float], start: date, weekday_df: pd.DataFrame, events_df: pd.DataFrame) -> tuple[list[float], dict[date, float]]:
+def apply_weekday_and_events(base_occ: List[float], start: date, weekday_df: pd.DataFrame, events_df: pd.DataFrame) -> Tuple[List[float], Dict[date, float]]:
     name_to_factor = dict(zip(weekday_df["weekday"], weekday_df["factor"]))
     idx_to_name = weekday_index_map()
     uplift_map, elast_map = expand_event_ranges(events_df)
 
-    adj = []
+    adj: List[float] = []
     for i, o in enumerate(base_occ):
         d = start + timedelta(days=i+1)  # forecast starts tomorrow
         wname = idx_to_name[d.weekday()]
@@ -185,15 +188,15 @@ def apply_weekday_and_events(base_occ: list[float], start: date, weekday_df: pd.
     return adj, elast_map
 
 
-def rate_recommendation(current_occ: float, room_rate: float, fences: tuple[float, float]) -> float:
+def rate_recommendation(current_occ: float, room_rate: float, fences: Tuple[float, float]) -> float:
     min_r, max_r = fences
     if current_occ < LOW_OCC_THRESHOLD:
         gap = (LOW_OCC_THRESHOLD - current_occ) / LOW_OCC_THRESHOLD
-        adj = np.clip(gap * MAX_DOWN_ADJ, 0, MAX_DOWN_ADJ)
+        adj = float(np.clip(gap * MAX_DOWN_ADJ, 0, MAX_DOWN_ADJ))
         rec = room_rate * (1 - adj)
     elif current_occ > HIGH_OCC_THRESHOLD:
         gap = (current_occ - HIGH_OCC_THRESHOLD) / (1 - HIGH_OCC_THRESHOLD)
-        adj = np.clip(gap * MAX_UP_ADJ, 0, MAX_UP_ADJ)
+        adj = float(np.clip(gap * MAX_UP_ADJ, 0, MAX_UP_ADJ))
         rec = room_rate * (1 + adj)
     else:
         rec = room_rate
@@ -236,22 +239,19 @@ def simulate_day(
     overbook: int,
     cancels_pct: float,
     elasticity_factor: float = 1.0,  # < 1.0 during compression
-    occ_bias: float = 0.0,           # +/- adjust perceived occ for rate recs (budget pacing)
-) -> dict:
-    occ_unconst: float,
-    room_df: pd.DataFrame,
-    seg_df: pd.DataFrame,
-    today_rates_map: Dict[str, float],
-    overbook: int,
-    cancels_pct: float,
-    elasticity_factor: float = 1.0,  # < 1.0 during compression
-) -> dict:
+    budget_pressure: float = 0.0,    # >0 if behind budget (down-nudge rates)
+) -> Dict[str, object]:
     total_rooms = int(room_df["rooms"].sum())
 
     # Rate recommendation per type for this occupancy
-    rec_rates = {}
+    rec_rates: Dict[str, float] = {}
+    budget_mult = 1.0 - 0.05 * float(np.clip(budget_pressure, -1.0, 1.0))
     for _, r in room_df.iterrows():
-        curr_rate = float(today_rates_map.get(r["room_type"], r["base        rec_rates[r["room_type"]] = rec
+        curr_rate = float(today_rates_map.get(r["room_type"], r["base_rate"]))
+        rec = rate_recommendation(occ_unconst, curr_rate, (float(r["min_rate"]), float(r["max_rate"])) )
+        rec *= budget_mult  # budget nudge
+        rec = float(np.clip(rec, float(r["min_rate"]), float(r["max_rate"])) )
+        rec_rates[r["room_type"]] = rec
 
     # Weighted avg recommended ADR vs base
     base_avg = float(np.average(room_df["base_rate"], weights=room_df["rooms"]))
@@ -262,7 +262,7 @@ def simulate_day(
     demand_rooms = occ_unconst * total_rooms
 
     # Segment demand and elasticity (dampened during events)
-    demand_by_seg = {s["segment"]: demand_rooms * s["mix"] for _, s in seg_df.iterrows()}
+    demand_by_seg: Dict[str, float] = {s["segment"]: demand_rooms * float(s["mix"]) for _, s in seg_df.iterrows()}
     for _, s in seg_df.iterrows():
         eff_el = float(s["elasticity"]) * float(elasticity_factor)
         mult = elasticity_demand_multiplier(price_change_pct, eff_el)
@@ -305,14 +305,14 @@ def simulate_day(
         "kpis": kpis,
         "by_type": by_type,
         "rec_rates": rec_rates,
+        "seg_alloc": alloc,
     }
 
 # -------------------------
 # UI — Sidebar inputs
 # -------------------------
-
 st.title("🏨 Hotel Revenue Simulator — Ramada Abu Dhabi Corniche")
-st.caption("Beginner-friendly tool for daily pricing, forecasting, and KPIs (with Abu Dhabi events)")
+st.caption("Beginner-friendly tool for daily pricing, forecasting, KPIs, events & budgets")
 
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -379,39 +379,29 @@ with st.sidebar:
             key="events_editor",
         )
 
-    with st.expander("Budget & Pace (current month)", expanded=True):
-        # Pick any date inside the budget month (defaults to today)
-        budget_ref_date = st.date_input("Budget month (pick any date in the month)")
-        # Initialize a budget table with segments present in seg_df
-        _seg_names = seg_df["segment"].tolist() if not seg_df.empty else DEFAULT_SEGS["segment"].tolist()
-        budget_init = pd.DataFrame({
-            "segment": _seg_names,
-            "budget_RN": [0]*len(_seg_names),
-            "budget_ADR": [0.0]*len(_seg_names),
-            "budget_Revenue": [0.0]*len(_seg_names),
-            "MTD_actual_RN": [0]*len(_seg_names),
-            "MTD_actual_Revenue": [0.0]*len(_seg_names),
+    st.divider()
+    with st.expander("Monthly Budget (segment RN & ADR)", expanded=False):
+        st.caption("Enter full-month budgets. We’ll prorate to days left in the current month for variance and nudges.")
+        default_bud = pd.DataFrame({
+            "segment": seg_df["segment"],
+            "budget_rn": 0,
+            "budget_adr": 0.0,
         })
         budget_df = st.data_editor(
-            budget_init,
+            default_bud,
             use_container_width=True,
             num_rows="dynamic",
             column_config={
-                "segment": st.column_config.TextColumn("Segment"),
-                "budget_RN": st.column_config.NumberColumn("Budget RN (month)", min_value=0, step=1),
-                "budget_ADR": st.column_config.NumberColumn("Budget ADR", min_value=0.0, step=1.0),
-                "budget_Revenue": st.column_config.NumberColumn("Budget Revenue (optional)", min_value=0.0, step=100.0),
-                "MTD_actual_RN": st.column_config.NumberColumn("MTD Actual RN (optional)", min_value=0, step=1),
-                "MTD_actual_Revenue": st.column_config.NumberColumn("MTD Actual Revenue (optional)", min_value=0.0, step=100.0),
+                "segment": st.column_config.TextColumn(disabled=True),
+                "budget_rn": st.column_config.NumberColumn("Budget RN (month)", min_value=0, step=10),
+                "budget_adr": st.column_config.NumberColumn("Budget ADR (month)", min_value=0.0, step=5.0),
             },
             key="budget_editor",
         )
-        st.caption("Tip: Fill at least Budget RN and ADR by segment. If you add MTD Actuals, the simulator will pace against remaining days.")
+        use_budget_nudge = st.toggle("Use budget variance to nudge today’s rates (±5%)", value=False)
 
-    st.divider()
     with st.expander("Overbooking & Cancels", expanded=False):
         overbook_rooms = st.number_input("Overbooking buffer (rooms)", min_value=0, max_value=100, value=DEFAULT_OVERBOOK)
-        cancels_pct = st.number_input("Cancels/No-Show %", min_value=0.0, max_value=0.5, value=DEFAULT_CANCELS_NOSHOW, step=0.01, format="%.2f")
         cancels_pct = st.number_input("Cancels/No-Show %", min_value=0.0, max_value=0.5, value=DEFAULT_CANCELS_NOSHOW, step=0.01, format="%.2f")
 
 # -------------------------
@@ -425,12 +415,12 @@ with colA:
 
 with colB:
     st.subheader("Today's Posted Rates")
-    if room_df.empty:
+    if DEFAULT_ROOMS.empty:
         st.info("Add at least one room type in the sidebar.")
         st.stop()
     today_rates_df = pd.DataFrame({
-        "room_type": room_df["room_type"],
-        "today_rate": room_df["base_rate"],
+        "room_type": DEFAULT_ROOMS["room_type"],
+        "today_rate": DEFAULT_ROOMS["base_rate"],
     })
     today_rates_df = st.data_editor(
         today_rates_df,
@@ -459,10 +449,11 @@ run_btn = st.button("🚀 Run Forecast & Recommendations", type="primary")
 # Execute simulation
 # -------------------------
 if run_btn:
-    if room_df.empty or seg_df.empty:
+    if DEFAULT_ROOMS.empty or seg_df.empty:
         st.error("Please configure room types and segments.")
         st.stop()
 
+    room_df = DEFAULT_ROOMS.copy()
     total_rooms = int(room_df["rooms"].sum())
 
     # Prepare history
@@ -500,16 +491,17 @@ if run_btn:
     kpis_today = compute_kpis(total_rooms, rooms_sold_today, rev_today, net_today)
 
     # Rate recs for today (rule-based)
-    rate_recs_today = []
+    rate_recs_today: List[Tuple[str, float, float, float]] = []
     for _, r in room_df.iterrows():
         curr_rate = float(today_rates_map.get(r["room_type"], r["base_rate"]))
         rec = rate_recommendation(today_occ, curr_rate, (float(r["min_rate"]), float(r["max_rate"])) )
-        rate_recs_today.append((r["room_type"], curr_rate, rec))
-    rate_recs_df = pd.DataFrame(rate_recs_today, columns=["room_type", "today_rate", "recommended_rate"]) 
+        rate_recs_today.append((r["room_type"], curr_rate, rec, float(r["max_rate"])) )
+    rate_recs_df = pd.DataFrame(rate_recs_today, columns=["room_type", "today_rate", "recommended_rate", "max_rate"]) 
 
     # Forecast next N days
-    projections = []
-    rec_tables = []
+    projections: List[Dict[str, object]] = []
+    rec_tables: List[Dict[str, object]] = []
+    seg_series: List[Tuple[date, Dict[str, float]]] = []
     for i, occ_u in enumerate(occ_forecast, start=1):
         d = start_date + timedelta(days=i)
         sim = simulate_day(
@@ -520,6 +512,7 @@ if run_btn:
             overbook=int(overbook_rooms),
             cancels_pct=float(cancels_pct),
             elasticity_factor=float(elast_map.get(d, 1.0)),
+            budget_pressure=0.0,
         )
         projections.append({
             "date": d,
@@ -536,9 +529,54 @@ if run_btn:
         rec_row = {"date": d}
         rec_row.update(sim["rec_rates"])  # columns per room_type
         rec_tables.append(rec_row)
+        seg_series.append((d, sim["seg_alloc"]))
 
     forecast_df = pd.DataFrame(projections)
     rate_plan_future = pd.DataFrame(rec_tables)
+
+    # -------------------------
+    # Budget vs Forecast (current month)
+    # -------------------------
+    month_start = start_date.replace(day=1)
+    next_month = (start_date.replace(day=28) + timedelta(days=4)).replace(day=1)
+    month_end = next_month - timedelta(days=1)
+    days_in_month = month_end.day
+    days_left = max(0, (month_end - start_date).days)
+
+    # Aggregate forecast segment RN for remainder of month
+    seg_forecast_to_go: Dict[str, float] = {s: 0.0 for s in seg_df["segment"].tolist()}
+    for d, alloc in seg_series:
+        if d <= month_end:
+            for k, v in alloc.items():
+                seg_forecast_to_go[k] = seg_forecast_to_go.get(k, 0.0) + float(v)
+
+    # Prorate budgets for days left
+    bud = budget_df.copy()
+    if not bud.empty and days_in_month > 0:
+        prorate = days_left / days_in_month
+        bud["budget_to_go_rn"] = bud["budget_rn"].astype(float) * prorate
+    else:
+        bud["budget_to_go_rn"] = 0.0
+
+    bud = bud.merge(pd.DataFrame({"segment": list(seg_forecast_to_go.keys()), "forecast_to_go_rn": list(seg_forecast_to_go.values())}), on="segment", how="outer").fillna(0)
+    bud["variance_rn"] = bud["forecast_to_go_rn"] - bud["budget_to_go_rn"]
+    bud["variance_%"] = np.where(bud["budget_to_go_rn"]>0, bud["variance_rn"] / bud["budget_to_go_rn"], 0.0)
+
+    total_budget_to_go = float(bud["budget_to_go_rn"].sum())
+    total_forecast_to_go = float(bud["forecast_to_go_rn"].sum())
+    total_gap_pct = (total_forecast_to_go - total_budget_to_go) / total_budget_to_go if total_budget_to_go > 0 else 0.0
+    budget_pressure = float(np.clip(-total_gap_pct, -1.0, 1.0))  # positive if behind budget
+
+    st.subheader("Budget vs Forecast — Remainder of Month")
+    st.dataframe(bud[["segment","budget_to_go_rn","forecast_to_go_rn","variance_rn","variance_%"]], use_container_width=True)
+
+    # Budget‑nudged rate suggestion for TODAY
+    if use_budget_nudge and total_budget_to_go > 0:
+        rate_recs_df = rate_recs_df.copy()
+        rate_recs_df["budget_nudged_rate"] = (
+            rate_recs_df["recommended_rate"] * (1.0 - 0.05 * budget_pressure)
+        ).clip(lower=room_df["min_rate"].values, upper=room_df["max_rate"].values)
+        st.info(f"Budget pressure: {budget_pressure:+.2f} (−1 ahead … +1 behind). Applied ±5% max to today’s rates.")
 
     # -------------------------
     # OUTPUT — KPIs & Tables
@@ -556,7 +594,7 @@ if run_btn:
         st.metric("Today RevPAR (Net)", f"{kpis_today['RevPAR_net']:,.0f}")
 
     st.subheader("Today's Rate Recommendations")
-    st.dataframe(rate_recs_df, use_container_width=True)
+    st.dataframe(rate_recs_df.drop(columns=["max_rate"]), use_container_width=True)
 
     st.subheader("Next Days Forecast (Summary)")
     dfp = forecast_df.copy()
